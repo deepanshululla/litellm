@@ -545,3 +545,137 @@ def test_output_format_removed_from_bedrock_invoke_request():
     assert (
         "output_format" not in result
     ), f"output_format should be removed for Bedrock Invoke, got keys: {result.keys()}"
+
+
+_SUPPORTED_MODELS = [
+    "anthropic.claude-opus-4-6-v1",
+    "us.anthropic.claude-opus-4-6-v1",
+    "anthropic.claude-sonnet-4-6",
+    "global.anthropic.claude-sonnet-4-6",
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
+]
+
+_EXCLUDED_MODELS = [
+    "anthropic.claude-opus-4-7",
+    "us.anthropic.claude-opus-4-7",
+    "anthropic.claude-opus-4-8",
+    "global.anthropic.claude-opus-4-8",
+]
+
+_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "out",
+        "schema": {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+@pytest.mark.parametrize("model", _SUPPORTED_MODELS)
+def test_needs_tool_workaround_false_for_supported_models(model: str) -> None:
+    assert AmazonAnthropicClaudeConfig._needs_tool_workaround(model) is False
+
+
+@pytest.mark.parametrize("model", _EXCLUDED_MODELS)
+def test_needs_tool_workaround_true_for_excluded_models(model: str) -> None:
+    assert AmazonAnthropicClaudeConfig._needs_tool_workaround(model) is True
+
+
+@pytest.mark.parametrize("model", _SUPPORTED_MODELS)
+def test_map_openai_params_native_path_for_supported_models(model: str) -> None:
+    config = AmazonAnthropicClaudeConfig()
+    result = config.map_openai_params(
+        non_default_params={"response_format": _RESPONSE_FORMAT},
+        optional_params={},
+        model=model,
+        drop_params=False,
+    )
+    assert "output_format" in result, "native path must produce output_format"
+    assert "tool_choice" not in result or result.get("json_mode") is not True
+
+
+@pytest.mark.parametrize("model", _EXCLUDED_MODELS)
+def test_map_openai_params_tool_path_for_excluded_models(model: str) -> None:
+    config = AmazonAnthropicClaudeConfig()
+    result = config.map_openai_params(
+        non_default_params={"response_format": _RESPONSE_FORMAT},
+        optional_params={},
+        model=model,
+        drop_params=False,
+    )
+    assert result.get("json_mode") is True
+    assert result.get("tool_choice", {}).get("type") == "tool"
+    assert "output_format" not in result
+
+
+def test_beta_header_injected_when_output_format_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", "True")
+    import litellm.anthropic_beta_headers_manager as mgr
+
+    mgr._BETA_HEADERS_CONFIG = None
+
+    config = AmazonAnthropicClaudeConfig()
+    beta_list = config._compute_bedrock_invoke_beta_headers(
+        model="anthropic.claude-opus-4-6-v1",
+        messages=[],
+        optional_params={"output_format": {"type": "json", "json_schema": {}}},
+        headers={},
+    )
+    assert "structured-outputs-2025-11-13" in beta_list
+
+
+def test_beta_header_not_injected_without_output_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", "True")
+    import litellm.anthropic_beta_headers_manager as mgr
+
+    mgr._BETA_HEADERS_CONFIG = None
+
+    config = AmazonAnthropicClaudeConfig()
+    beta_list = config._compute_bedrock_invoke_beta_headers(
+        model="anthropic.claude-opus-4-6-v1",
+        messages=[],
+        optional_params={},
+        headers={},
+    )
+    assert "structured-outputs-2025-11-13" not in beta_list
+
+
+def test_build_request_keeps_output_format_for_supported_model() -> None:
+    config = AmazonAnthropicClaudeConfig()
+    result = config._build_bedrock_anthropic_request_base(
+        model="anthropic.claude-opus-4-6-v1",
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={
+            "output_format": {
+                "type": "json_schema",
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            "max_tokens": 100,
+        },
+        litellm_params={},
+        headers={},
+    )
+    assert "output_format" in result, "output_format must survive in request body for supported models"
+
+
+def test_build_request_converts_output_format_to_inline_schema_for_excluded_model() -> None:
+    config = AmazonAnthropicClaudeConfig()
+    result = config._build_bedrock_anthropic_request_base(
+        model="anthropic.claude-opus-4-7",
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={
+            "output_format": {
+                "type": "json_schema",
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            "max_tokens": 100,
+        },
+        litellm_params={},
+        headers={},
+    )
+    assert "output_format" not in result, "output_format must be converted for excluded models"

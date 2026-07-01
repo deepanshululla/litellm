@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 import httpx
 
 from litellm.anthropic_beta_headers_manager import filter_and_transform_beta_headers
+from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
 from litellm.litellm_core_utils.litellm_logging import verbose_logger
 from litellm.litellm_core_utils.prompt_templates.factory import (
     convert_to_anthropic_image_obj,
@@ -55,6 +56,11 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
     """
 
     anthropic_version: str = "bedrock-2023-05-31"
+    _BEDROCK_INVOKE_TOOL_WORKAROUND_MODELS: frozenset[str] = frozenset({"opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"})
+
+    @classmethod
+    def _needs_tool_workaround(cls, model: str) -> bool:
+        return any(s in model.lower() for s in cls._BEDROCK_INVOKE_TOOL_WORKAROUND_MODELS)
 
     @property
     def custom_llm_provider(self) -> Optional[str]:
@@ -73,35 +79,35 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
-        # Force tool-based structured outputs for Bedrock Invoke
-        # (similar to VertexAI fix in #19201)
-        # Bedrock Invoke doesn't support output_format parameter
-        original_model = model
-        if "response_format" in non_default_params:
-            # Use a model name that forces tool-based approach
-            model = "claude-3-sonnet-20240229"
+        self._clamp_adaptive_reasoning_effort_for_bedrock(model=model, params=non_default_params)
 
-        # Clamp ``reasoning_effort`` to the Bedrock effort ceiling before the
-        # parent mapping converts it to ``output_config.effort`` and the
-        # downstream effort gate runs. Mirrors the converse path's
-        # ``_handle_reasoning_effort_parameter`` and the messages path's
-        # ``_clamp_adaptive_reasoning_effort_for_bedrock`` so adaptive Claude
-        # requests degrade ``xhigh`` -> ``max`` rather than 400-ing on
-        # models like Opus 4.6 that don't natively advertise xhigh.
-        self._clamp_adaptive_reasoning_effort_for_bedrock(model=original_model, params=non_default_params)
+        if "response_format" in non_default_params and self._needs_tool_workaround(model):
+            stripped_params = {k: v for k, v in non_default_params.items() if k != "response_format"}
+            mapped = AnthropicConfig.map_openai_params(
+                self,
+                stripped_params,
+                optional_params,
+                model,
+                drop_params,
+            )
+            is_thinking = self.is_thinking_enabled(non_default_params)
+            tool = self.map_response_format_to_anthropic_tool(
+                non_default_params["response_format"], mapped, is_thinking
+            )
+            if tool is not None:
+                mapped = self._add_tools_to_optional_params(mapped, tools=[tool])
+                if not is_thinking:
+                    mapped["tool_choice"] = {"name": RESPONSE_FORMAT_TOOL_NAME, "type": "tool"}
+                mapped["json_mode"] = True
+            return mapped
 
-        optional_params = AnthropicConfig.map_openai_params(
+        return AnthropicConfig.map_openai_params(
             self,
             non_default_params,
             optional_params,
             model,
             drop_params,
         )
-
-        # Restore original model name
-        model = original_model
-
-        return optional_params
 
     @staticmethod
     def _clamp_adaptive_reasoning_effort_for_bedrock(model: str, params: dict) -> None:
@@ -213,10 +219,13 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         output_format = anthropic_request.pop("output_format", None)
         output_config_format = pop_bedrock_invoke_output_config_format(anthropic_request)
         if output_format:
-            convert_bedrock_invoke_output_format_to_inline_schema(
-                output_format=output_format,
-                request_body=anthropic_request,
-            )
+            if self._needs_tool_workaround(model):
+                convert_bedrock_invoke_output_format_to_inline_schema(
+                    output_format=output_format,
+                    request_body=anthropic_request,
+                )
+            else:
+                anthropic_request["output_format"] = output_format
         elif output_config_format:
             convert_bedrock_invoke_output_format_to_inline_schema(
                 output_format=output_config_format,
@@ -271,6 +280,9 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
             mcp_server_used=self.is_mcp_server_used(optional_params.get("mcp_servers")),
         )
         beta_set.update(auto_betas)
+
+        if optional_params.get("output_format") is not None:
+            beta_set.add("structured-outputs-2025-11-13")
 
         if tool_search_used and not (programmatic_tool_calling_used or input_examples_used):
             beta_set.discard(ANTHROPIC_TOOL_SEARCH_BETA_HEADER)
