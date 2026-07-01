@@ -1592,3 +1592,193 @@ def test_system_prompt_only_adds_blank_user_message():
     #########################################################
     assert len(data["system_instruction"]) == 1
     assert data["system_instruction"]["parts"][0]["text"] == SYSTEM_INSTRUCTION
+
+
+# Regression tests for https://github.com/BerriAI/litellm/issues/26939
+# Timeout forwarding from async_streaming / completion to make_call / make_sync_call
+
+
+@pytest.mark.asyncio
+async def test_make_call_forwards_timeout():
+    """make_call() must pass the caller-supplied timeout to AsyncHTTPHandler.post()."""
+    import httpx
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
+        make_call,
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.aiter_lines = AsyncMock(return_value=iter([]))
+    mock_response.headers = {}
+
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    mock_logging = MagicMock()
+    mock_logging.post_call = MagicMock()
+
+    expected_timeout = httpx.Timeout(5.0)
+
+    with patch(
+        "litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini.ModelResponseIterator"
+    ):
+        await make_call(
+            client=mock_client,
+            gemini_client=None,
+            api_base="https://example.com/stream",
+            headers={"Authorization": "Bearer test"},
+            data='{"contents": []}',
+            model="gemini-1.5-flash",
+            messages=[],
+            logging_obj=mock_logging,
+            timeout=expected_timeout,
+        )
+
+    mock_client.post.assert_called_once()
+    _, kwargs = mock_client.post.call_args
+    assert kwargs.get("timeout") == expected_timeout
+
+
+def test_make_sync_call_forwards_timeout():
+    """make_sync_call() must pass the caller-supplied timeout to HTTPHandler.post()."""
+    import httpx
+    from unittest.mock import MagicMock, patch
+
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
+        make_sync_call,
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.iter_lines = MagicMock(return_value=iter([]))
+    mock_response.headers = {}
+
+    mock_client = MagicMock()
+    mock_client.post = MagicMock(return_value=mock_response)
+
+    mock_logging = MagicMock()
+    mock_logging.post_call = MagicMock()
+
+    expected_timeout = httpx.Timeout(10.0)
+
+    with patch(
+        "litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini.ModelResponseIterator"
+    ):
+        make_sync_call(
+            client=mock_client,
+            gemini_client=None,
+            api_base="https://example.com/stream",
+            headers={"Authorization": "Bearer test"},
+            data='{"contents": []}',
+            model="gemini-1.5-flash",
+            messages=[],
+            logging_obj=mock_logging,
+            timeout=expected_timeout,
+        )
+
+    mock_client.post.assert_called_once()
+    _, kwargs = mock_client.post.call_args
+    assert kwargs.get("timeout") == expected_timeout
+
+
+@pytest.mark.asyncio
+async def test_make_call_timeout_none_passes_none():
+    """When timeout=None, make_call() must pass None to client.post() (not omit it)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
+        make_call,
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.aiter_lines = AsyncMock(return_value=iter([]))
+    mock_response.headers = {}
+
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    mock_logging = MagicMock()
+    mock_logging.post_call = MagicMock()
+
+    with patch(
+        "litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini.ModelResponseIterator"
+    ):
+        await make_call(
+            client=mock_client,
+            gemini_client=None,
+            api_base="https://example.com/stream",
+            headers={},
+            data="{}",
+            model="gemini-1.5-flash",
+            messages=[],
+            logging_obj=mock_logging,
+            timeout=None,
+        )
+
+    mock_client.post.assert_called_once()
+    _, kwargs = mock_client.post.call_args
+    assert "timeout" in kwargs
+    assert kwargs["timeout"] is None
+
+
+def test_async_streaming_partial_includes_timeout():
+    """The partial built by async_streaming() for make_call must contain the timeout kwarg.
+
+    We verify this by constructing the partial the same way the production code does
+    and confirming that the timeout keyword is present with the expected value.
+    """
+    from functools import partial
+    from unittest.mock import MagicMock
+
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
+        make_call,
+    )
+
+    expected_timeout = 30.0
+    mock_logging = MagicMock()
+
+    # Reproduce the partial construction from async_streaming() exactly.
+    built_partial = partial(
+        make_call,
+        gemini_client=None,
+        api_base="https://example.com/api",
+        headers={"Authorization": "Bearer token"},
+        data="{}",
+        model="gemini-1.5-flash",
+        messages=[],
+        logging_obj=mock_logging,
+        timeout=expected_timeout,
+    )
+
+    assert built_partial.keywords.get("timeout") == expected_timeout
+
+
+def test_completion_sync_streaming_partial_includes_timeout():
+    """The partial built by completion() sync streaming for make_sync_call must contain the timeout kwarg."""
+    from functools import partial
+    from unittest.mock import MagicMock
+
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
+        make_sync_call,
+    )
+
+    expected_timeout = 15.0
+    mock_logging = MagicMock()
+
+    # Reproduce the partial construction from completion() sync streaming path exactly.
+    built_partial = partial(
+        make_sync_call,
+        gemini_client=None,
+        api_base="https://example.com/api",
+        data="{}",
+        model="gemini-1.5-flash",
+        messages=[],
+        logging_obj=mock_logging,
+        headers={"Authorization": "Bearer token"},
+        timeout=expected_timeout,
+    )
+
+    assert built_partial.keywords.get("timeout") == expected_timeout

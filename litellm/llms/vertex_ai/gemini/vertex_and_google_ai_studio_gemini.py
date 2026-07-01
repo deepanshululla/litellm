@@ -2563,6 +2563,7 @@ async def make_call(
     model: str,
     messages: list,
     logging_obj,
+    timeout: float | httpx.Timeout | None = None,
 ):
     if gemini_client is not None:
         client = gemini_client
@@ -2572,7 +2573,9 @@ async def make_call(
         )
 
     try:
-        response = await client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+        response = await client.post(
+            api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj, timeout=timeout
+        )
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         exception_string = str(await e.response.aread())
@@ -2615,13 +2618,14 @@ def make_sync_call(
     model: str,
     messages: list,
     logging_obj,
+    timeout: float | httpx.Timeout | None = None,
 ):
     if gemini_client is not None:
         client = gemini_client
     if client is None:
         client = HTTPHandler()  # Create a new client if none provided
 
-    response = client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+    response = client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj, timeout=timeout)
 
     if response.status_code != 200 and response.status_code != 201:
         raise VertexAIError(
@@ -2742,6 +2746,7 @@ class VertexLLM(VertexBase):
                 model=model,
                 messages=messages,
                 logging_obj=logging_obj,
+                timeout=timeout,
             ),
             model=model,
             custom_llm_provider="vertex_ai_beta",
@@ -3024,6 +3029,7 @@ class VertexLLM(VertexBase):
                     messages=messages,
                     logging_obj=logging_obj,
                     headers=headers,
+                    timeout=timeout,
                 ),
                 model=model,
                 custom_llm_provider="vertex_ai_beta",
