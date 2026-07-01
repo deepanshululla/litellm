@@ -2924,6 +2924,25 @@ class Logging(LiteLLMLoggingBaseClass):
         Implementing async callbacks, to handle asyncio event loop issues when custom integrations need to use async functions.
         """
         await self.special_failure_handlers(exception=exception)
+
+        _is_first_failure = not self.model_call_details.get("has_logged_async_failure", False)
+        _pre_gate_callbacks = self.get_combined_callback_list(
+            dynamic_success_callbacks=self.dynamic_async_failure_callbacks,
+            global_callbacks=litellm._async_failure_callback,
+        )
+        for _cb in _pre_gate_callbacks:
+            if isinstance(_cb, CustomLogger):
+                try:
+                    await _cb.async_log_deployment_failure_event(
+                        kwargs=self.model_call_details,
+                        exception=exception,
+                        is_first_failure_in_chain=_is_first_failure,
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
+                except Exception as _pre_gate_err:  # noqa: BLE001 - hook errors must never interrupt the existing gated failure path
+                    verbose_logger.debug("async_log_deployment_failure_event error: %s", _pre_gate_err)
+
         if not self.should_run_logging(event_type="async_failure"):  # prevent double logging
             return
         start_time, end_time = self._failure_handler_helper_fn(

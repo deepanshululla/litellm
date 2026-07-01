@@ -1,5 +1,6 @@
 #### What this does ####
 #    On success, logs events to Promptlayer
+import datetime
 import re
 import traceback
 from typing import (
@@ -175,6 +176,49 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         pass
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        pass
+
+    async def async_log_deployment_failure_event(
+        self,
+        kwargs: dict[str, object],
+        exception: Exception,
+        is_first_failure_in_chain: bool,
+        start_time: Optional[datetime.datetime],
+        end_time: Optional[datetime.datetime],
+    ) -> None:
+        """
+        Per-attempt deployment failure event.
+
+        Fires on EVERY failed deployment call within a single Logging instance;
+        attempt 1 AND every retry, fallback attempt, or bridge inner-call failure.
+        Use this for callbacks that need to count every attempted deployment call
+        (deployment counters, per-attempt cooldown, custom per-attempt logic).
+
+        This is a DEPLOYMENT-LEVEL signal; distinct from the existing
+        ``async_log_failure_event``, which is a REQUEST-LEVEL signal (fires once
+        per logical client request, blocked by the dedup gate on repeats).
+
+        Default: no-op. Opt in by overriding.
+
+        Parameters
+        ----------
+        kwargs : dict
+            The LIVE ``model_call_details`` dict of the shared Logging instance,
+            passed by reference. Do NOT mutate it. No assignments, no
+            ``kwargs[k] = v``, no ``kwargs.update(...)``. Mutations persist into
+            the gated path and into all subsequent attempts on the same instance.
+        exception : Exception
+            The current attempt's exception. Always use this; do NOT read from
+            ``kwargs["exception"]`` (stale or missing on the pre-gate path).
+        is_first_failure_in_chain : bool
+            True on the FIRST failure for this Logging instance, False on every
+            subsequent attempt (fallback chain attempts 2+, retries, bridge
+            inner-call failures). Use this to coordinate with callbacks that
+            already fire via the gated ``async_log_failure_event`` path on
+            attempt 1 to avoid double-counting.
+        start_time, end_time
+            Timestamps as the failure handler received them.
+        """
         pass
 
     async def async_log_audit_log_event(self, audit_log: "StandardAuditLogPayload"):
