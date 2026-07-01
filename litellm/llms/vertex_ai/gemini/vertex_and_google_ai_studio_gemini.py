@@ -3090,13 +3090,23 @@ class ModelResponseIterator:
         self.streaming_response = streaming_response
         self.response = response
         self.chunk_type: Literal["valid_json", "accumulated_json"] = "valid_json"
-        self.accumulated_json = ""
+        self.accumulated_json_chunks: list[
+            str
+        ] = []  # mutable-ok: SSE fragment accumulation buffer; immutable equivalent would require rebuilding on every shard
         self.sent_first_chunk = False
         self.logging_obj = logging_obj
         self.response_headers = response_headers or {}
         self.is_function_call = check_is_function_call(logging_obj)
         self.cumulative_tool_call_index: int = 0
         self.has_seen_tool_calls: bool = False
+
+    @property
+    def accumulated_json(self) -> str:
+        return "".join(self.accumulated_json_chunks)
+
+    @accumulated_json.setter
+    def accumulated_json(self, value: str) -> None:
+        self.accumulated_json_chunks = [value] if value else []
 
     @staticmethod
     def _check_streaming_error(chunk: dict) -> None:
@@ -3304,20 +3314,19 @@ class ModelResponseIterator:
         chunk = litellm.CustomStreamWrapper._strip_sse_data_from_chunk(chunk) or ""
         message = chunk.replace("\n\n", "")
 
-        self.accumulated_json += message
+        self.accumulated_json_chunks.append(message)
 
-        # json.loads on the whole buffer after every fragment is O(n^2) and
-        # holds the GIL, freezing the event loop for seconds on large responses
-        # (https://github.com/BerriAI/litellm/issues/26181). A complete Gemini
-        # chunk is a JSON object/array, so only attempt the parse once the
-        # buffer's last non-whitespace byte can close one.
-        stripped = self.accumulated_json.rstrip()
-        if not stripped or stripped[-1] not in "}]":
+        _stripped = message.rstrip()
+        if _stripped and _stripped[-1] not in ("}", "]"):
+            return None
+
+        _full_json = "".join(self.accumulated_json_chunks)
+        if not _full_json:
             return None
 
         try:
-            _data = json.loads(self.accumulated_json)
-            self.accumulated_json = ""  # reset after successful parsing
+            _data = json.loads(_full_json)
+            self.accumulated_json_chunks = []  # mutable-ok: reset accumulation buffer after successful parse
             return self.chunk_parser(chunk=_data)
         except json.JSONDecodeError:
             return None
@@ -3344,7 +3353,7 @@ class ModelResponseIterator:
         try:
             chunk = self.response_iterator.__next__()
         except StopIteration:
-            if self.chunk_type == "accumulated_json" and self.accumulated_json:
+            if self.chunk_type == "accumulated_json" and self.accumulated_json_chunks:
                 return self.handle_accumulated_json_chunk(chunk="")
             raise StopIteration
         except ValueError as e:
@@ -3366,7 +3375,7 @@ class ModelResponseIterator:
         try:
             chunk = await self.async_response_iterator.__anext__()
         except StopAsyncIteration:
-            if self.chunk_type == "accumulated_json" and self.accumulated_json:
+            if self.chunk_type == "accumulated_json" and self.accumulated_json_chunks:
                 return self.handle_accumulated_json_chunk(chunk="")
             raise StopAsyncIteration
         except ValueError as e:
