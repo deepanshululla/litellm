@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Literal, Optional
 
 from pydantic import Field
 
@@ -48,6 +48,24 @@ class AktoConfigModel(GuardrailConfigModel):
     guardrail_timeout: Optional[int] = Field(
         default=None,
         description="HTTP timeout in seconds. Default: 5.",
+    )
+
+    streaming_end_of_stream_only: bool = Field(
+        default=True,
+        description=(
+            "When True, the post_call streaming hook calls apply_guardrail once at "
+            "end-of-stream rather than on every sampled chunk. Defaults to True because "
+            "Akto's ingest endpoint only needs the complete response."
+        ),
+    )
+
+    apply_guardrail_to_model_groups: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "If set, run Akto only for requests whose requested model group is in "
+            "this list (matched case-insensitively against the request's model / "
+            "model_group). Empty/None = all model groups."
+        ),
     )
 
     @staticmethod

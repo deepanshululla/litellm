@@ -860,7 +860,7 @@ class CustomGuardrail(CustomLogger):
             else:
                 guardrail_response = "allow"
 
-        verbose_logger.debug(f"Guardrail response: {response}")
+        verbose_logger.debug("Guardrail response: %s", response)
 
         self.add_standard_logging_guardrail_information_to_request_data(
             guardrail_json_response=guardrail_response,

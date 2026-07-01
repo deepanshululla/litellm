@@ -585,3 +585,186 @@ def test_build_tag_metadata(akto_validate, sample_request_data):
     assert tag["gen-ai"] == "Gen AI"
     assert tag["user_id"] == "user-1"
     assert tag["team_id"] == "team-1"
+
+
+# ---------------------------------------------------------------------------
+#  during_call support
+# ---------------------------------------------------------------------------
+
+
+def test_during_call_in_hook_to_input():
+    assert "during_call" in AktoGuardrail.HOOK_TO_INPUT
+    assert AktoGuardrail.HOOK_TO_INPUT["during_call"] == "request"
+
+
+def test_during_call_in_supported_event_hooks():
+    from litellm.types.guardrails import GuardrailEventHooks
+
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="during-call-test",
+        event_hook="during_call",
+    )
+    assert GuardrailEventHooks.during_call in g.supported_event_hooks
+
+
+@pytest.mark.asyncio
+async def test_during_call_runs_request_side_check(sample_inputs, sample_request_data):
+    """during_call must run the same validate flow as pre_call (input_type=request)."""
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="during-call-validate",
+        event_hook="during_call",
+    )
+    g.async_handler.post = AsyncMock(return_value=_mock_allowed_response())
+
+    result = await g.apply_guardrail(
+        inputs=sample_inputs,
+        request_data=sample_request_data,
+        input_type="request",
+    )
+
+    assert result == sample_inputs
+    g.async_handler.post.assert_called_once()
+    call_params = g.async_handler.post.call_args.kwargs["params"]
+    assert call_params.get("guardrails") == "true"
+    assert "ingest_data" not in call_params
+
+
+@pytest.mark.asyncio
+async def test_during_call_response_input_is_noop(sample_inputs, sample_request_data):
+    """during_call must not fire for response input_type."""
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="during-call-noop",
+        event_hook="during_call",
+    )
+    g.async_handler.post = AsyncMock()
+
+    result = await g.apply_guardrail(
+        inputs=sample_inputs,
+        request_data=sample_request_data,
+        input_type="response",
+    )
+
+    assert result == sample_inputs
+    g.async_handler.post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+#  streaming_end_of_stream_only
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_end_of_stream_only_default():
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="streaming-default",
+        event_hook="post_call",
+    )
+    assert g.streaming_end_of_stream_only is True
+
+
+def test_streaming_end_of_stream_only_override():
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="streaming-override",
+        event_hook="post_call",
+        streaming_end_of_stream_only=False,
+    )
+    assert g.streaming_end_of_stream_only is False
+
+
+# ---------------------------------------------------------------------------
+#  _normalize_allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_allowlist_strips_and_lowercases():
+    result = AktoGuardrail._normalize_allowlist(["GPT-4O ", " claude-3-haiku"])
+    assert result == frozenset({"gpt-4o", "claude-3-haiku"})
+
+
+def test_normalize_allowlist_none():
+    assert AktoGuardrail._normalize_allowlist(None) == frozenset()
+
+
+def test_normalize_allowlist_empty_list():
+    assert AktoGuardrail._normalize_allowlist([]) == frozenset()
+
+
+def test_normalize_allowlist_drops_blank_entries():
+    result = AktoGuardrail._normalize_allowlist(["gpt-4o", "  ", ""])
+    assert result == frozenset({"gpt-4o"})
+
+
+# ---------------------------------------------------------------------------
+#  Model-group scoping (should_run_guardrail + _matches_model_group)
+# ---------------------------------------------------------------------------
+
+
+def _make_guardrail_with_allowlist(model_groups: list) -> AktoGuardrail:
+    return AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="scoped-test",
+        event_hook="pre_call",
+        default_on=True,
+        apply_guardrail_to_model_groups=model_groups,
+    )
+
+
+def test_model_group_allowlist_filters_out_unlisted_model():
+    from litellm.types.guardrails import GuardrailEventHooks
+
+    g = _make_guardrail_with_allowlist(["gpt-4o"])
+    result = g.should_run_guardrail(
+        data={"model": "claude-3-haiku"},
+        event_type=GuardrailEventHooks.pre_call,
+    )
+    assert result is False
+
+
+def test_model_group_allowlist_allows_listed_model():
+    from litellm.types.guardrails import GuardrailEventHooks
+
+    g = _make_guardrail_with_allowlist(["gpt-4o"])
+    result = g.should_run_guardrail(
+        data={"model": "gpt-4o"},
+        event_type=GuardrailEventHooks.pre_call,
+    )
+    assert result is True
+
+
+def test_model_group_allowlist_is_case_insensitive():
+    from litellm.types.guardrails import GuardrailEventHooks
+
+    g = _make_guardrail_with_allowlist(["GPT-4O"])
+    result = g.should_run_guardrail(
+        data={"model": "gpt-4o"},
+        event_type=GuardrailEventHooks.pre_call,
+    )
+    assert result is True
+
+
+def test_model_group_allowlist_none_allows_all():
+    from litellm.types.guardrails import GuardrailEventHooks
+
+    g = AktoGuardrail(
+        akto_base_url="http://localhost:9090",
+        akto_api_key="test-token",
+        guardrail_name="no-filter-test",
+        event_hook="pre_call",
+        default_on=True,
+        apply_guardrail_to_model_groups=None,
+    )
+    result = g.should_run_guardrail(
+        data={"model": "any-model"},
+        event_type=GuardrailEventHooks.pre_call,
+    )
+    assert result is True

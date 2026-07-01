@@ -514,8 +514,8 @@ class OpenAIChatCompletionsHandler(BaseTranslation):
             )
 
         verbose_proxy_logger.debug(
-            "OpenAI Chat Completions: Processed output streaming responses: %s",
-            responses_so_far,
+            "OpenAI Chat Completions: Processed output streaming responses (%d chunks)",
+            len(responses_so_far),
         )
 
         return responses_so_far
