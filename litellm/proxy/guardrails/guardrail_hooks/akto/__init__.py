@@ -18,6 +18,8 @@ def initialize_guardrail(litellm_params: "LitellmParams", guardrail: "Guardrail"
         akto_vxlan_id=getattr(litellm_params, "akto_vxlan_id", None),
         unreachable_fallback=getattr(litellm_params, "unreachable_fallback", "fail_closed"),
         guardrail_timeout=getattr(litellm_params, "guardrail_timeout", None),
+        streaming_end_of_stream_only=getattr(litellm_params, "streaming_end_of_stream_only", True),
+        apply_guardrail_to_model_groups=getattr(litellm_params, "apply_guardrail_to_model_groups", None),
         guardrail_name=guardrail.get("guardrail_name", ""),
         event_hook=litellm_params.mode,
         default_on=litellm_params.default_on,

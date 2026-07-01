@@ -14,7 +14,6 @@ Pattern Overview:
 This pattern can be replicated for other message formats (e.g., Anthropic).
 """
 
-import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 import litellm
@@ -514,11 +513,10 @@ class OpenAIChatCompletionsHandler(BaseTranslation):
                 task_mappings=task_mappings,
             )
 
-        if verbose_proxy_logger.isEnabledFor(logging.DEBUG):
-            verbose_proxy_logger.debug(
-                "OpenAI Chat Completions: Processed output streaming responses (%d chunks)",
-                len(responses_so_far),
-            )
+        verbose_proxy_logger.debug(
+            "OpenAI Chat Completions: Processed output streaming responses (%d chunks)",
+            len(responses_so_far),
+        )
 
         return responses_so_far
 

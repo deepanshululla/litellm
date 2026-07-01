@@ -40,8 +40,14 @@ DEFAULT_GUARDRAIL_TIMEOUT = 5
 class AktoGuardrail(CustomGuardrail):
     """LiteLLM guardrail hook that validates and ingests LLM traffic via the Akto API."""
 
-    # Maps event_hook to the input_type it should handle; mismatches are no-ops
-    HOOK_TO_INPUT = {"pre_call": "request", "post_call": "response"}
+    # Maps event_hook to the input_type it should handle; mismatches are no-ops.
+    # during_call reuses the request-side validate flow (Akto verdict runs in
+    # parallel with the LLM call instead of strictly before it).
+    HOOK_TO_INPUT = {
+        "pre_call": "request",
+        "during_call": "request",
+        "post_call": "response",
+    }
 
     @staticmethod
     def get_config_model() -> Type["GuardrailConfigModel"]:
@@ -60,6 +66,8 @@ class AktoGuardrail(CustomGuardrail):
         akto_vxlan_id: Optional[str] = None,
         unreachable_fallback: Literal["fail_closed", "fail_open"] = "fail_closed",
         guardrail_timeout: Optional[int] = None,
+        streaming_end_of_stream_only: bool = True,
+        apply_guardrail_to_model_groups: Optional[list[str]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the Akto guardrail.
@@ -69,8 +77,13 @@ class AktoGuardrail(CustomGuardrail):
             akto_api_key: Akto API key. Falls back to AKTO_API_KEY env var.
             akto_account_id: Akto account ID. Falls back to AKTO_ACCOUNT_ID env var, then "1000000".
             akto_vxlan_id: Akto VXLAN ID. Falls back to AKTO_VXLAN_ID env var, then "0".
-            unreachable_fallback: Behavior when Akto is unreachable — block or allow.
+            unreachable_fallback: Behavior when Akto is unreachable; block or allow.
             guardrail_timeout: HTTP timeout in seconds for Akto API calls.
+            streaming_end_of_stream_only: When True, the post_call streaming hook only calls
+                apply_guardrail once at end-of-stream rather than on every sampled chunk.
+                Defaults to True because Akto's ingest endpoint only needs the complete response.
+            apply_guardrail_to_model_groups: When set, Akto runs only for requests whose model
+                group is in this list (case-insensitive). None means all model groups.
         """
         self.async_handler = get_async_httpx_client(
             llm_provider=httpxSpecialProvider.GuardrailCallback,
@@ -90,8 +103,15 @@ class AktoGuardrail(CustomGuardrail):
         self.akto_account_id = akto_account_id or os.environ.get("AKTO_ACCOUNT_ID", "1000000")
         self.akto_vxlan_id = akto_vxlan_id or os.environ.get("AKTO_VXLAN_ID", "0")
 
+        self.streaming_end_of_stream_only = streaming_end_of_stream_only
+
+        self.apply_guardrail_to_model_groups: frozenset[str] = self._normalize_allowlist(
+            apply_guardrail_to_model_groups
+        )
+
         kwargs["supported_event_hooks"] = [
             GuardrailEventHooks.pre_call,
+            GuardrailEventHooks.during_call,
             GuardrailEventHooks.post_call,
         ]
         super().__init__(**kwargs)
@@ -101,6 +121,35 @@ class AktoGuardrail(CustomGuardrail):
             self.akto_base_url,
             self.unreachable_fallback,
         )
+
+    @staticmethod
+    def _normalize_allowlist(values: Optional[list[str]]) -> frozenset[str]:
+        """Lowercase + strip allowlist entries into a frozenset; drop empties."""
+        if not values:
+            return frozenset()
+        return frozenset(str(v).strip().lower() for v in values if str(v).strip())
+
+    def _matches_model_group(self, data: dict) -> bool:
+        """True if the request's model group is in apply_guardrail_to_model_groups."""
+        if not self.apply_guardrail_to_model_groups:
+            return False
+        model_group = data.get("model") or self.resolve_metadata_value(data, "model_group")
+        if not model_group:
+            return False
+        return str(model_group).strip().lower() in self.apply_guardrail_to_model_groups
+
+    def should_run_guardrail(self, data: dict, event_type: "GuardrailEventHooks") -> bool:
+        """Gate the base decision with the optional model-group allowlist.
+
+        When apply_guardrail_to_model_groups is set, Akto runs only for requests whose
+        model group is in the allowlist. With no list configured, the base default_on
+        logic applies unchanged.
+        """
+        if not super().should_run_guardrail(data, event_type):
+            return False
+        if not self.apply_guardrail_to_model_groups:
+            return True
+        return self._matches_model_group(data)
 
     @staticmethod
     def resolve_metadata_value(request_data: Optional[dict], key: str) -> Optional[str]:
