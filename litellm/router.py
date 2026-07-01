@@ -2068,6 +2068,9 @@ class Router:
                 async for item in model_response:
                     yield item
             except MidStreamFallbackError as e:
+                if not e.is_pre_first_chunk and e.generated_content:
+                    raise
+
                 from litellm.main import stream_chunk_builder
 
                 complete_response_object = stream_chunk_builder(chunks=model_response.chunks)
@@ -2086,24 +2089,7 @@ class Router:
                         "content_policy_fallbacks", self.content_policy_fallbacks
                     )
                     initial_kwargs["original_function"] = self._acompletion
-                    if e.is_pre_first_chunk or not e.generated_content:
-                        # No content was generated before the error (e.g. a
-                        # rate-limit 429 on the very first chunk).  Retry with
-                        # the original messages — adding a continuation prompt
-                        # would waste tokens and confuse the model.
-                        initial_kwargs["messages"] = messages
-                    else:
-                        initial_kwargs["messages"] = messages + [
-                            {
-                                "role": "system",
-                                "content": "You are a helpful assistant. You are given a message and you need to respond to it. You are also given a generated content. You need to respond to the message in continuation of the generated content. Do not repeat the same content. Your response should be in continuation of this text: ",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": e.generated_content,
-                                "prefix": True,
-                            },
-                        ]
+                    initial_kwargs["messages"] = messages
                     self._update_kwargs_before_fallbacks(model=model_group, kwargs=initial_kwargs)
                     fallback_response = await self.async_function_with_fallbacks_common_utils(
                         e=e,
@@ -2623,6 +2609,9 @@ class Router:
                 for item in model_response:
                     yield item
             except MidStreamFallbackError as e:
+                if not e.is_pre_first_chunk and e.generated_content:
+                    raise
+
                 from litellm.main import stream_chunk_builder
 
                 complete_response_object = stream_chunk_builder(chunks=model_response.chunks)
@@ -2642,20 +2631,7 @@ class Router:
                         router_self.content_policy_fallbacks,
                     )
                     initial_kwargs["original_function"] = router_self._completion
-                    if e.is_pre_first_chunk or not e.generated_content:
-                        initial_kwargs["messages"] = messages
-                    else:
-                        initial_kwargs["messages"] = messages + [
-                            {
-                                "role": "system",
-                                "content": "You are a helpful assistant. You are given a message and you need to respond to it. You are also given a generated content. You need to respond to the message in continuation of the generated content. Do not repeat the same content. Your response should be in continuation of this text: ",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": e.generated_content,
-                                "prefix": True,
-                            },
-                        ]
+                    initial_kwargs["messages"] = messages
                     router_self._update_kwargs_before_fallbacks(model=model_group, kwargs=initial_kwargs)
                     fallback_response = router_self.function_with_fallbacks(
                         **initial_kwargs,
@@ -2866,6 +2842,21 @@ class Router:
             )
 
             if isinstance(response, CustomStreamWrapper):
+                if response.completion_stream is None and response.make_call is not None:
+                    try:
+                        await response.fetch_stream()
+                    except Exception as fetch_err:
+                        _headers = getattr(fetch_err, "headers", None)
+                        if isinstance(_headers, dict):
+                            _framing_headers = frozenset(
+                                {"content-length", "transfer-encoding", "content-encoding", "content-type"}
+                            )
+                            setattr(
+                                fetch_err,
+                                "headers",
+                                {k: v for k, v in _headers.items() if k.lower() not in _framing_headers},
+                            )
+                        raise fetch_err
                 return await self._acompletion_streaming_iterator(
                     model_response=response,
                     messages=messages,
@@ -6106,7 +6097,7 @@ class Router:
         """
         Common utilities for async_function_with_fallbacks
         """
-        verbose_router_logger.debug(f"Traceback{traceback.format_exc()}")
+        verbose_router_logger.debug("Traceback", exc_info=True)
         original_exception = e
         fallback_model_group = None
         original_model_group: Optional[str] = kwargs.get("model")  # type: ignore
@@ -6291,7 +6282,7 @@ class Router:
                     if litellm.expose_router_debug_in_errors:
                         e.message += "\n{}".format(error_message)
             if fallbacks is not None and model_group is not None:
-                verbose_router_logger.debug(f"inside model fallbacks: {mask_sensitive_structure(fallbacks)}")
+                verbose_router_logger.debug("inside model fallbacks: %s", mask_sensitive_structure(fallbacks))
                 (
                     fallback_model_group,
                     generic_fallback_idx,
@@ -6306,7 +6297,9 @@ class Router:
                 if fallback_model_group is None:
                     masked_fallbacks = mask_sensitive_structure(fallbacks)
                     verbose_router_logger.info(
-                        f"No fallback model group found for original model_group={model_group}. Fallbacks={masked_fallbacks}"
+                        "No fallback model group found for original model_group=%s. Fallbacks=%s",
+                        model_group,
+                        masked_fallbacks,
                     )
                     if hasattr(original_exception, "message") and litellm.expose_router_debug_in_errors:
                         original_exception.message += f"No fallback model group found for original model_group={model_group}. Fallbacks={masked_fallbacks}"  # type: ignore
@@ -6328,15 +6321,17 @@ class Router:
         except Exception as new_exception:
             parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
             fallback_failure_exception_str = redact_string(str(new_exception))
+            cooldown_info = await _async_get_cooldown_deployments_with_debug_info(
+                litellm_router_instance=self,
+                parent_otel_span=parent_otel_span,
+            )
             verbose_router_logger.error(
-                "litellm.router.py::async_function_with_fallbacks() - Error occurred while trying to do fallbacks - {}\n{}\n\nDebug Information:\nCooldown Deployments={}".format(
-                    fallback_failure_exception_str,
-                    redact_string(traceback.format_exc()),
-                    await _async_get_cooldown_deployments_with_debug_info(
-                        litellm_router_instance=self,
-                        parent_otel_span=parent_otel_span,
-                    ),
-                )
+                "litellm.router.py::async_function_with_fallbacks() - "
+                "Error occurred while trying to do fallbacks - %s\n"
+                "Debug Information:\nCooldown Deployments=%s",
+                fallback_failure_exception_str,
+                cooldown_info,
+                exc_info=True,
             )
 
         if hasattr(original_exception, "message") and litellm.expose_router_debug_in_errors:
