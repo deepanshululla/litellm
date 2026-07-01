@@ -2229,3 +2229,91 @@ def test_get_logging_payload_cache_hit_keeps_raw_litellm_call_id():
     assert json.loads(payload["metadata"])["litellm_call_id"] == trace_call_id
     assert "_cache_hit" in payload["request_id"]
     assert json.loads(payload["metadata"])["litellm_call_id"] != payload["request_id"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: cache_key guard must check supported_call_types
+# ---------------------------------------------------------------------------
+
+
+class TestGetLoggingPayloadCacheKeyGuard:
+    """get_logging_payload must mirror caching_handler's three-part guard:
+    cache configured AND supported_call_types not None AND call_type in list.
+    Without this, get_cache_key runs for every request even when the call type
+    is not cacheable, wasting CPU and storing a misleading hash in spend logs.
+    """
+
+    def test_cache_none_returns_cache_off(self):
+        """When litellm.cache is None, cache_key must be 'Cache OFF'."""
+        kwargs: dict[str, object] = {
+            "call_type": "acompletion",
+            "model": "gpt-4o",
+            "litellm_params": {"metadata": {}},
+        }
+        now = datetime.datetime.now(timezone.utc)
+        with patch.object(litellm, "cache", None):
+            payload = get_logging_payload(
+                kwargs=kwargs, response_obj={}, start_time=now, end_time=now
+            )
+        assert payload["cache_key"] == "Cache OFF"
+
+    def test_cache_configured_call_type_not_in_supported_call_types_skips_get_cache_key(
+        self,
+    ):
+        """When cache is present but supported_call_types is empty, get_cache_key
+        must NOT be called and cache_key must be 'Cache OFF'."""
+        mock_cache = MagicMock()
+        mock_cache.supported_call_types = []
+        mock_cache.get_cache_key.return_value = "sha256-hash"
+        kwargs: dict[str, object] = {
+            "call_type": "acompletion",
+            "model": "gpt-4o",
+            "litellm_params": {"metadata": {}},
+        }
+        now = datetime.datetime.now(timezone.utc)
+        with patch.object(litellm, "cache", mock_cache):
+            payload = get_logging_payload(
+                kwargs=kwargs, response_obj={}, start_time=now, end_time=now
+            )
+        mock_cache.get_cache_key.assert_not_called()
+        assert payload["cache_key"] == "Cache OFF"
+
+    def test_cache_configured_call_type_in_supported_call_types_calls_get_cache_key(
+        self,
+    ):
+        """When cache is present and call_type is in supported_call_types,
+        get_cache_key must be called and cache_key must equal its return value."""
+        mock_cache = MagicMock()
+        mock_cache.supported_call_types = ["acompletion"]
+        mock_cache.get_cache_key.return_value = "sha256-hash"
+        kwargs: dict[str, object] = {
+            "call_type": "acompletion",
+            "model": "gpt-4o",
+            "litellm_params": {"metadata": {}},
+        }
+        now = datetime.datetime.now(timezone.utc)
+        with patch.object(litellm, "cache", mock_cache):
+            payload = get_logging_payload(
+                kwargs=kwargs, response_obj={}, start_time=now, end_time=now
+            )
+        mock_cache.get_cache_key.assert_called_once()
+        assert payload["cache_key"] == "sha256-hash"
+
+    def test_cache_supported_call_types_none_skips_get_cache_key(self):
+        """When supported_call_types is None, get_cache_key must NOT be called
+        and cache_key must be 'Cache OFF'."""
+        mock_cache = MagicMock()
+        mock_cache.supported_call_types = None
+        mock_cache.get_cache_key.return_value = "sha256-hash"
+        kwargs: dict[str, object] = {
+            "call_type": "acompletion",
+            "model": "gpt-4o",
+            "litellm_params": {"metadata": {}},
+        }
+        now = datetime.datetime.now(timezone.utc)
+        with patch.object(litellm, "cache", mock_cache):
+            payload = get_logging_payload(
+                kwargs=kwargs, response_obj={}, start_time=now, end_time=now
+            )
+        mock_cache.get_cache_key.assert_not_called()
+        assert payload["cache_key"] == "Cache OFF"

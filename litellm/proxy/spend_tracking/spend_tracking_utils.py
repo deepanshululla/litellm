@@ -367,10 +367,13 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time) -> SpendLogs
             additional_usage_values.update({k: v})
     clean_metadata["additional_usage_values"] = additional_usage_values
 
-    if litellm.cache is not None:
+    cache_key = "Cache OFF"
+    if (
+        litellm.cache is not None
+        and litellm.cache.supported_call_types is not None
+        and call_type in litellm.cache.supported_call_types
+    ):
         cache_key = litellm.cache.get_cache_key(**kwargs)
-    else:
-        cache_key = "Cache OFF"
     if cache_hit is True:
         import time
 
