@@ -1818,3 +1818,118 @@ async def test_update_database_does_not_deepcopy_on_request_path():
     fake_payload["nested"]["a"] = 999
     assert batch_payload["model"] == "gpt-4"
     assert batch_payload["nested"]["a"] == 1
+
+
+@pytest.mark.asyncio
+async def test_disable_entity_spend_updates_suppresses_batch_task():
+    """
+    Regression: _batch_database_updates must NOT be scheduled when
+    general_settings.disable_entity_spend_updates is True.
+    """
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+    db_writer._batch_database_updates = AsyncMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()),
+        patch("litellm.proxy.proxy_server.litellm_proxy_budget_name", "test-budget"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"disable_entity_spend_updates": True},
+        ),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer.asyncio.create_task"
+        ) as mock_create_task,
+    ):
+        await db_writer.update_database(
+            token="sk-test",
+            response_cost=0.1,
+            user_id="user123",
+            completion_response=None,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            end_user_id="end_user_id",
+            team_id="team_id",
+            org_id="org_id",
+            kwargs={},
+        )
+
+    mock_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_disable_entity_spend_updates_preserves_spend_logs():
+    """
+    When disable_entity_spend_updates=True and disable_spend_logs=False,
+    raw spend log rows are still written to LiteLLM_SpendLogs.
+    """
+    db_writer = DBSpendUpdateWriter()
+    mock_prisma_client = MagicMock()
+    mock_prisma_client.spend_log_transactions = []
+    mock_prisma_client._spend_log_transactions_lock = asyncio.Lock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", mock_prisma_client),
+        patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()),
+        patch("litellm.proxy.proxy_server.litellm_proxy_budget_name", "test-budget"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"disable_entity_spend_updates": True},
+        ),
+    ):
+        await db_writer.update_database(
+            token="sk-test",
+            response_cost=0.1,
+            user_id="user123",
+            completion_response=None,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            end_user_id="end_user_id",
+            team_id="team_id",
+            org_id="org_id",
+            kwargs={},
+        )
+
+    assert len(mock_prisma_client.spend_log_transactions) == 1
+
+
+@pytest.mark.asyncio
+async def test_disable_entity_spend_updates_false_schedules_batch_task():
+    """
+    When disable_entity_spend_updates is absent (default), _batch_database_updates
+    is still scheduled as a background task.
+    """
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+    db_writer._batch_database_updates = AsyncMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()),
+        patch("litellm.proxy.proxy_server.litellm_proxy_budget_name", "test-budget"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {},
+        ),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer.asyncio.create_task"
+        ) as mock_create_task,
+    ):
+        await db_writer.update_database(
+            token="sk-test",
+            response_cost=0.1,
+            user_id="user123",
+            completion_response=None,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            end_user_id="end_user_id",
+            team_id="team_id",
+            org_id="org_id",
+            kwargs={},
+        )
+
+    mock_create_task.assert_called_once()
