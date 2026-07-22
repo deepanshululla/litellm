@@ -271,16 +271,18 @@ def _cost_value_as_float(value: Union[str, int, float, None]) -> Optional[float]
 
 _PreRoutingStrategyT = TypeVar("_PreRoutingStrategyT")
 
-_HTTP_FRAMING_HEADERS: frozenset[str] = frozenset({
-    "content-length",
-    "transfer-encoding",
-    "content-encoding",
-    "content-type",
-    "set-cookie",
-    "cookie",
-    "proxy-authenticate",
-    "proxy-authorization",
-})
+_HTTP_FRAMING_HEADERS: frozenset[str] = frozenset(
+    {
+        "content-length",
+        "transfer-encoding",
+        "content-encoding",
+        "content-type",
+        "set-cookie",
+        "cookie",
+        "proxy-authenticate",
+        "proxy-authorization",
+    }
+)
 
 
 def _strip_http_framing_headers(exc: BaseException) -> None:
